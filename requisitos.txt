@@ -6,3 +6,4 @@ reportlab
 openpyxl
 plotly
 reportlab
+canvas
