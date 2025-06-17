@@ -1,9 +1,4 @@
-
 streamlit
+reportlab
 pandas
 plotly
-reportlab
-openpyxl
-plotly
-reportlab
-canvas
