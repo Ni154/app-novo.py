@@ -1,12 +1,10 @@
 import streamlit as st
 import sqlite3
 from datetime import datetime
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 import io
-import os
 import pandas as pd
 import plotly.express as px
+from fpdf import FPDF  # Aqui usamos fpdf2
 
 # Inicializa banco de dados
 conn = sqlite3.connect("sistema.db", check_same_thread=False)
@@ -80,7 +78,7 @@ if not st.session_state.logado:
         cursor.execute("SELECT * FROM usuarios WHERE usuario=? AND senha=?", (usuario, senha))
         if cursor.fetchone():
             st.session_state.logado = True
-            st.rerun()
+            st.experimental_rerun()
         else:
             st.error("Usuário ou senha incorretos")
             st.stop()
@@ -127,7 +125,7 @@ else:
         nome = st.text_input("Nome")
         cpf = st.text_input("CPF")
         telefone = st.text_input("Telefone")
-        endereco = st.text_area("Endereço (Rua, Número, Apto...)")
+        endereco = st.text_input("Endereço (Rua, Apt, Nº)")
         if st.button("Cadastrar Cliente"):
             if nome:
                 try:
@@ -138,6 +136,10 @@ else:
                     st.error(f"Erro ao cadastrar cliente: {e}")
             else:
                 st.warning("Informe o nome do cliente")
+
+        st.subheader("Clientes cadastrados")
+        clientes = cursor.execute("SELECT id, nome, cpf, telefone, endereco FROM clientes").fetchall()
+        st.dataframe(clientes)
 
     elif st.session_state.pagina == "Produtos":
         st.subheader("Cadastro de Produtos")
@@ -160,35 +162,48 @@ else:
                 st.warning("Preencha os campos obrigatórios.")
 
         st.subheader("Produtos Cadastrados")
-        produtos_df = pd.read_sql("SELECT id, nome, preco, estoque, categoria FROM produtos", conn)
-        for index, row in produtos_df.iterrows():
-            st.write(f"**Produto:** {row['nome']} | **Preço:** R$ {row['preco']} | **Estoque:** {row['estoque']} | **Categoria:** {row['categoria']}")
-            if st.button(f"Excluir {row['nome']}"):
-                cursor.execute("DELETE FROM produtos WHERE id=?", (row['id'],))
+        produtos = cursor.execute("SELECT id, nome, preco, estoque, categoria FROM produtos").fetchall()
+        df_produtos = pd.DataFrame(produtos, columns=["ID", "Nome", "Preço", "Estoque", "Categoria"])
+        st.dataframe(df_produtos)
+
+        st.subheader("Excluir Produto")
+        produto_para_excluir = st.selectbox("Selecione o produto para excluir", df_produtos["Nome"])
+        if st.button("Excluir Produto"):
+            try:
+                cursor.execute("DELETE FROM produtos WHERE nome=?", (produto_para_excluir,))
                 conn.commit()
-                st.success("Produto excluído com sucesso")
+                st.success(f"Produto '{produto_para_excluir}' excluído com sucesso")
                 st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Erro ao excluir produto: {e}")
 
     elif st.session_state.pagina == "Vendas":
         st.subheader("Registrar Venda")
-        produtos = [row[0] for row in cursor.execute("SELECT nome FROM produtos").fetchall()]
-        clientes = [row[0] for row in cursor.execute("SELECT nome FROM clientes").fetchall()]
+        produtos = cursor.execute("SELECT id, nome, preco, estoque FROM produtos").fetchall()
+        clientes = cursor.execute("SELECT id, nome, cpf, telefone, endereco FROM clientes").fetchall()
         formas_pagamento = ["Dinheiro", "Cartão", "PIX"]
 
         if produtos and clientes:
-            produto = st.selectbox("Produto", produtos)
-            produto_info = cursor.execute("SELECT preco, estoque, unidade, categoria FROM produtos WHERE nome=?", (produto,)).fetchone()
-            st.write(f"**Preço:** R$ {produto_info[0]} | **Estoque:** {produto_info[1]} | **Unidade:** {produto_info[2]} | **Categoria:** {produto_info[3]}")
+            dict_produtos = {p[1]: p for p in produtos}
+            dict_clientes = {c[1]: c for c in clientes}
 
-            cliente = st.selectbox("Cliente", clientes)
-            cliente_info = cursor.execute("SELECT telefone, endereco FROM clientes WHERE nome=?", (cliente,)).fetchone()
-            st.write(f"**Telefone:** {cliente_info[0]} | **Endereço:** {cliente_info[1]}")
-
+            produto_selecionado = st.selectbox("Produto", list(dict_produtos.keys()))
+            cliente_selecionado = st.selectbox("Cliente", list(dict_clientes.keys()))
             forma_pagamento = st.selectbox("Forma de Pagamento", formas_pagamento)
             quantidade = st.number_input("Quantidade", min_value=1, step=1)
 
+            # Mostrando dados do cliente e produto selecionados
+            info_cliente = dict_clientes[cliente_selecionado]
+            st.markdown(f"**Telefone:** {info_cliente[3]}")
+            st.markdown(f"**Endereço:** {info_cliente[4]}")
+
+            info_produto = dict_produtos[produto_selecionado]
+            st.markdown(f"**Preço:** R$ {info_produto[2]:.2f}")
+            st.markdown(f"**Estoque:** {info_produto[3]}")
+
             if st.button("Finalizar Venda"):
-                preco, estoque = produto_info[0], produto_info[1]
+                preco = info_produto[2]
+                estoque = info_produto[3]
                 if quantidade > estoque:
                     st.warning("Estoque insuficiente")
                 else:
@@ -197,24 +212,28 @@ else:
 
                     try:
                         cursor.execute("INSERT INTO vendas (data, produto, cliente, quantidade, total) VALUES (?, ?, ?, ?, ?)",
-                            (data_venda, produto, cliente, quantidade, total))
-                        cursor.execute("UPDATE produtos SET estoque=estoque-? WHERE nome=?", (quantidade, produto))
+                            (data_venda, produto_selecionado, cliente_selecionado, quantidade, total))
+                        cursor.execute("UPDATE produtos SET estoque=estoque-? WHERE nome=?", (quantidade, produto_selecionado))
                         conn.commit()
 
+                        # Gerar comprovante PDF usando fpdf
                         buffer = io.BytesIO()
-                        c = canvas.Canvas(buffer)
-                        c.drawString(100, 800, "NS SISTEMAS - COMPROVANTE DE VENDA")
-                        c.drawString(100, 780, f"Data: {data_venda}")
-                        c.drawString(100, 760, f"Cliente: {cliente}")
-                        c.drawString(100, 740, f"Endereço: {cliente_info[1]}")
-                        c.drawString(100, 720, f"Telefone: {cliente_info[0]}")
-                        c.drawString(100, 700, f"Produto: {produto}")
-                        c.drawString(100, 680, f"Quantidade: {quantidade}")
-                        c.drawString(100, 660, f"Forma de Pagamento: {forma_pagamento}")
-                        c.drawString(100, 640, f"Total: R$ {total:.2f}")
-                        c.save()
+                        pdf = FPDF()
+                        pdf.add_page()
+                        pdf.set_font("Arial", size=12)
+                        pdf.cell(200, 10, "NS SISTEMAS - COMPROVANTE DE VENDA", ln=1, align="C")
+                        pdf.cell(200, 10, f"Data: {data_venda}", ln=2)
+                        pdf.cell(200, 10, f"Cliente: {cliente_selecionado}", ln=3)
+                        pdf.cell(200, 10, f"Telefone: {info_cliente[3]}", ln=4)
+                        pdf.cell(200, 10, f"Endereço: {info_cliente[4]}", ln=5)
+                        pdf.cell(200, 10, f"Produto: {produto_selecionado}", ln=6)
+                        pdf.cell(200, 10, f"Quantidade: {quantidade}", ln=7)
+                        pdf.cell(200, 10, f"Forma de Pagamento: {forma_pagamento}", ln=8)
+                        pdf.cell(200, 10, f"Total: R$ {total:.2f}", ln=9)
+                        pdf.output(buffer)
+                        buffer.seek(0)
 
-                        st.download_button("Baixar Comprovante em PDF", buffer.getvalue(), file_name="comprovante.pdf")
+                        st.download_button("Baixar Comprovante em PDF", buffer, file_name="comprovante.pdf")
                         st.success("Venda registrada com sucesso")
                     except Exception as e:
                         st.error(f"Erro ao registrar venda: {e}")
@@ -254,18 +273,17 @@ else:
             st.plotly_chart(grafico)
 
             buffer_pdf = io.BytesIO()
-            pdf = canvas.Canvas(buffer_pdf, pagesize=A4)
-            pdf.drawString(100, 800, "Relatório de Vendas")
-            pdf.drawString(100, 780, f"Período: {data_inicio} até {data_fim}")
-            y = 760
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.cell(200, 10, "Relatório de Vendas", ln=1, align="C")
+            pdf.cell(200, 10, f"Período: {data_inicio} até {data_fim}", ln=2)
+            y = 40
             for v in df:
                 linha = f"{v[0]} - {v[1]} - {v[2]} - Qtde: {v[3]} - R$ {v[4]:.2f}"
-                pdf.drawString(100, y, linha)
-                y -= 20
-                if y < 50:
-                    pdf.showPage()
-                    y = 800
-            pdf.drawString(100, y, f"Total vendido: R$ {total:.2f}")
-            pdf.save()
+                pdf.cell(200, 10, linha, ln=3)
+            pdf.cell(200, 10, f"Total vendido: R$ {total:.2f}", ln=4)
+            pdf.output(buffer_pdf)
+            buffer_pdf.seek(0)
 
-            st.download_button("Baixar Relatório em PDF", buffer_pdf.getvalue(), file_name="relatorio_vendas.pdf")
+            st.download_button("Baixar Relatório em PDF", buffer_pdf, file_name="relatorio_vendas.pdf")
